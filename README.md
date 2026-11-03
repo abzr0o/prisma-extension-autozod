@@ -7,6 +7,7 @@
 > Contract-aware compile-time linting and runtime Zod validation for the new Prisma ORM (@prisma/orm-postgres).
 
 `prisma-extension-autozod` connects **Zod 4** and **Prisma ORM 8**. It provides two layers of safety:
+
 1. **Compile-time Linting**: TypeScript flags any field in your Zod schema that does not exist in your Prisma data contract.
 2. **Runtime Middleware**: Automatically intercepts write operations (`create`, `update`, `insert`) via Prisma 8's `beforeCompile` hook, validates payloads, normalizes column naming conventions, and blocks invalid mutations before SQL reaches your database.
 
@@ -14,9 +15,9 @@
 
 ## Requirements
 
-- **Node.js**: `>= 24.0.0`
+- **Node.js**: `>=22.0.0`
 - **Prisma ORM**: `@prisma/orm-postgres >= 8.0.0`
-- **Zod**: `^4.0.0`
+- **Zod**: `>=4.0.0`
 
 ---
 
@@ -64,18 +65,30 @@ export const userValidator = defineModel(
   "User",
   z.object({
     email: z.string().email("Invalid email address"),
-    username: z.string().min(2, "Username must be at least 2 characters").nullable().optional(),
-    name: z.string().min(2, "Name must be at least 2 characters").nullable().optional(),
-  })
+    username: z
+      .string()
+      .min(2, "Username must be at least 2 characters")
+      .nullable()
+      .optional(),
+    name: z
+      .string()
+      .min(2, "Name must be at least 2 characters")
+      .nullable()
+      .optional(),
+  }),
 );
 ```
 
 > **Compile-Time Safety in Action:**
 > If you add a field that does not exist in the contract:
+>
 > ```typescript
-> defineModel("User", z.object({
->   nonExistentColumn: z.string() // Error: Field 'nonExistentColumn' does not exist in table contract
-> }));
+> defineModel(
+>   "User",
+>   z.object({
+>     nonExistentColumn: z.string(), // Error: Field 'nonExistentColumn' does not exist in table contract
+>   }),
+> );
 > ```
 
 ---
@@ -128,11 +141,9 @@ await db.orm.public.User.create({
 });
 
 // Update: Only supplied fields are validated
-await db.orm.public.User
-  .where({ email: "alice@prisma.io" })
-  .update({
-    name: "Alice Wonder", // Valid; other fields are not required on updates
-  });
+await db.orm.public.User.where({ email: "alice@prisma.io" }).update({
+  name: "Alice Wonder", // Valid; other fields are not required on updates
+});
 ```
 
 ---
@@ -140,28 +151,36 @@ await db.orm.public.User
 ## API Reference
 
 ### `createZodRegistry<TModels>()`
+
 Creates a model validator factory bound to your contract models. Validates that all fields in the schema exist in the contract table, allowing omission of auto-generated or optional fields.
+
 ```typescript
 const defineModel = createZodRegistry<typeof models.public>();
 const userValidator = defineModel("User", zodSchema);
 ```
 
 ### `createStrictZodRegistry<TModels>()`
+
 Creates a strict validator factory that requires all columns in the contract table to be declared in the schema, while also rejecting unknown fields.
+
 ```typescript
 const defineStrict = createStrictZodRegistry<typeof models.public>();
 const userValidator = defineStrict("User", zodSchema);
 ```
 
 ### `autoZodPrisma8(options)` (alias: `autoZod`)
+
 Prisma ORM 8 middleware factory:
+
 - `options.contract`: The raw `contract.json` object.
 - `options.validators`: Array of validator entries returned by `createZodRegistry` or `createStrictZodRegistry`.
 
 ### `extractColumns(contractJson)`
+
 Helper function that inspects storage namespaces inside `contract.json` and returns a normalized dictionary of table column names.
 
 ### `normalizeKey(key: string)`
+
 Normalizes strings to lowercase alphanumeric format for reliable case- and separator-insensitive mapping.
 
 ---
