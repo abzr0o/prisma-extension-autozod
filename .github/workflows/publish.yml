@@ -40,7 +40,7 @@ jobs:
         run: pnpm run build
 
       - name: Publish to npm
-        run: pnpm stage publish
+        run: npm stage publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
