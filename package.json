@@ -36,7 +36,8 @@
     "autozod",
     "orm",
     "contract-linting",
-    "prisma-orm-extension"
+    "prisma-orm-extension",
+    "prisma-zod-generator"
   ],
   "license": "MIT",
   "author": {
