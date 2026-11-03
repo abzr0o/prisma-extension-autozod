@@ -13,11 +13,22 @@
 
 ---
 
+## Why prisma-extension-autozod?
+
+| Feature | Manual Controller Validation | Schema Generators (zod-prisma) | prisma-extension-autozod |
+| :--- | :--- | :--- | :--- |
+| **Zero Controller Boilerplate** | No (Manual `.parse()`) | No (Manual `.parse()`) | Yes (Auto-intercepted) |
+| **Prisma 8 Native Architecture** | No | No | Yes (`beforeCompile` / Contract) |
+| **Compile-Time Typo Linter** | No | No | Yes (Immediate IDE feedback) |
+| **Casing Normalization** | No | No | Yes (`first_name` <-> `firstName`) |
+
+---
+
 ## Requirements
 
-- **Node.js**: `>=22.0.0`
+- **Node.js**: `>= 22.0.0`
 - **Prisma ORM**: `@prisma/orm-postgres >= 8.0.0`
-- **Zod**: `>=4.0.0`
+- **Zod**: `^4.0.0`
 
 ---
 
@@ -148,6 +159,40 @@ await db.orm.public.User.where({ email: "alice@prisma.io" }).update({
 
 ---
 
+### 4. Column Normalization in Action
+
+Incoming payloads from frontend forms or REST APIs often use `snake_case`. The middleware automatically remaps them to match your contract columns:
+
+```typescript
+// Incoming frontend payload uses snake_case:
+await db.orm.public.User.create({
+  first_name: "Alice", // Automatically remapped to `firstName` in Postgres
+  email: "alice@prisma.io",
+});
+```
+
+---
+
+### 5. Error Handling DX
+
+Because validation throws standard `ZodError` instances, you can easily catch and format errors for HTTP responses in Express, NestJS, Fastify, or Hono:
+
+```typescript
+import { ZodError } from "zod";
+
+try {
+  await db.orm.public.User.create(req.body);
+} catch (error) {
+  if (error instanceof ZodError) {
+    // Clean flattened validation errors directly back to the client
+    return res.status(400).json({ errors: error.flatten().fieldErrors });
+  }
+  throw error;
+}
+```
+
+---
+
 ## API Reference
 
 ### `createZodRegistry<TModels>()`
@@ -200,6 +245,17 @@ pnpm run typecheck
 # Build bundle (ESM + CJS + DTS)
 pnpm run build
 ```
+
+---
+
+## Contributing
+
+Contributions, bug reports, and feature requests are welcome!  
+Feel free to check the [issues page](https://github.com/abzr0o/prisma-extension-autozod/issues).
+
+## Support
+
+If this library saves you time or prevents schema bugs in production, consider giving it a star on [GitHub](https://github.com/abzr0o/prisma-extension-autozod)!
 
 ---
 
