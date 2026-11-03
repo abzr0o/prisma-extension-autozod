@@ -1,6 +1,6 @@
 {
   "name": "prisma-extension-autozod",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Contract-aware compile-time linting and runtime Zod validation for Prisma ORM 8 (@prisma/orm-postgres)",
   "type": "module",
   "main": "./dist/index.cjs",
