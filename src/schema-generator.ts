@@ -174,3 +174,4 @@ export function createUpdateSchema<
   updateSchema.tableName = modelName;
   return updateSchema;
 }
+
