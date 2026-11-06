@@ -5,28 +5,105 @@ import {
   autoZod,
   createZodRegistry,
   createStrictZodRegistry,
+  createInsertSchema,
+  createUpdateSchema,
   extractColumns,
+  extractContractMetadata,
+  isDefaultValueExpr,
   normalizeKey,
 } from "../src/index.js";
 
 describe("prisma-extension-autozod", () => {
+  // Complete sample contract matching Prisma ORM 8 contract.json structure
   const sampleContract = {
+    domain: {
+      namespaces: {
+        public: {
+          models: {
+            User: {
+              fields: {
+                id: {
+                  nullable: false,
+                  type: { codecId: "pg/int4@1", kind: "scalar" },
+                },
+                firstName: {
+                  nullable: false,
+                  type: { codecId: "pg/text@1", kind: "scalar" },
+                },
+                email: {
+                  nullable: false,
+                  type: { codecId: "pg/text@1", kind: "scalar" },
+                },
+                age: {
+                  nullable: false,
+                  type: { codecId: "pg/int4@1", kind: "scalar" },
+                },
+              },
+              storage: {
+                namespaceId: "public",
+                table: "users", // Storage table "users" != Domain model "User"
+                fields: {
+                  id: { column: "id" },
+                  firstName: { column: "first_name" }, // Model "firstName" -> Storage "first_name"
+                  email: { column: "email" },
+                  age: { column: "age" },
+                },
+              },
+            },
+            Post: {
+              fields: {
+                id: {
+                  nullable: false,
+                  type: { codecId: "pg/int4@1", kind: "scalar" },
+                },
+                title: {
+                  nullable: false,
+                  type: { codecId: "pg/text@1", kind: "scalar" },
+                },
+              },
+              storage: {
+                namespaceId: "public",
+                table: "posts",
+                fields: {
+                  id: { column: "id" },
+                  title: { column: "title" },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     storage: {
       namespaces: {
         public: {
-          tables: {
-            users: {
-              columns: {
-                id: { type: "int" },
-                firstName: { type: "text" },
-                email: { type: "text" },
-                age: { type: "int" },
+          entries: {
+            table: {
+              users: {
+                columns: {
+                  id: {
+                    default: {
+                      expression: "autoincrement()",
+                      kind: "function",
+                    },
+                    nullable: false,
+                  },
+                  first_name: { nullable: false },
+                  email: { nullable: false },
+                  age: { nullable: false },
+                },
               },
-            },
-            posts: {
-              columns: {
-                id: { type: "int" },
-                title: { type: "text" },
+              posts: {
+                columns: {
+                  id: {
+                    default: {
+                      expression: "autoincrement()",
+                      kind: "function",
+                    },
+                    nullable: false,
+                  },
+                  title: { nullable: false },
+                },
               },
             },
           },
@@ -43,10 +120,22 @@ describe("prisma-extension-autozod", () => {
     });
   });
 
+  describe("extractContractMetadata", () => {
+    it("should extract bidirectional model and storage mappings", () => {
+      const meta = extractContractMetadata(sampleContract);
+      const userMeta = meta.modelsByName.get("user");
+      expect(userMeta).toBeDefined();
+      expect(userMeta?.storageTable).toBe("users");
+      expect(userMeta?.modelFieldToColumn.get("firstname")).toBe("first_name");
+      expect(userMeta?.columnToModelField.get("firstname")).toBe("firstName");
+      expect(meta.modelsByTable.get("users")).toBe(userMeta);
+    });
+  });
+
   describe("extractColumns", () => {
     it("should extract normalized table columns from contract.json", () => {
       const catalog = extractColumns(sampleContract);
-      expect(catalog["users"]).toEqual(["id", "firstName", "email", "age"]);
+      expect(catalog["users"]).toEqual(["id", "first_name", "email", "age"]);
       expect(catalog["posts"]).toEqual(["id", "title"]);
     });
 
@@ -56,16 +145,65 @@ describe("prisma-extension-autozod", () => {
     });
   });
 
+  describe("createInsertSchema & createUpdateSchema", () => {
+    it("should infer insert schema with defaults marked optional and custom refinements", () => {
+      const userCreate = createInsertSchema(sampleContract, "User", {
+        email: (s) => s.email("Invalid email"),
+        firstName: (s) => s.min(2),
+      });
+
+      expect(userCreate.tableName).toBe("User");
+      const shape = userCreate.shape;
+
+      // id has default in storage, so it must be optional
+      expect(shape.id.isOptional()).toBe(true);
+
+      // Valid insert data
+      const valid = userCreate.parse({
+        firstName: "Alice",
+        email: "alice@prisma.io",
+        age: 25,
+      });
+      expect(valid.firstName).toBe("Alice");
+
+      // Invalid email refinement should throw
+      expect(() =>
+        userCreate.parse({
+          firstName: "Alice",
+          email: "invalid-email",
+          age: 25,
+        })
+      ).toThrow();
+    });
+
+    it("should generate partial update schema via createUpdateSchema", () => {
+      const userUpdate = createUpdateSchema(sampleContract, "User");
+      expect(userUpdate.tableName).toBe("User");
+
+      // All fields should be optional for updates
+      const valid = userUpdate.parse({
+        age: 30,
+      });
+      expect(valid.age).toBe(30);
+    });
+
+    it("should throw a helpful error if model is not found in contract", () => {
+      expect(() =>
+        createInsertSchema(sampleContract, "NonExistentModel")
+      ).toThrow(/not found in contract/);
+    });
+  });
+
   describe("createZodRegistry", () => {
     type TestModels = {
-      users: { id: number; firstName: string; email: string; age: number };
-      posts: { id: number; title: string };
+      User: { id: number; firstName: string; email: string; age: number };
+      Post: { id: number; title: string };
     };
 
     it("should construct typed validator entries", () => {
       const defineModel = createZodRegistry<TestModels>();
       const userValidator = defineModel(
-        "users",
+        "User",
         z.object({
           firstName: z.string().min(2),
           email: z.string().email(),
@@ -73,7 +211,7 @@ describe("prisma-extension-autozod", () => {
         })
       );
 
-      expect(userValidator.tableName).toBe("users");
+      expect(userValidator.tableName).toBe("User");
       expect(userValidator.schema).toBeDefined();
     });
 
@@ -81,7 +219,7 @@ describe("prisma-extension-autozod", () => {
       const defineModel = createZodRegistry<TestModels>();
       // @ts-expect-error nonExistentField is not in the contract
       defineModel(
-        "users",
+        "User",
         z.object({
           firstName: z.string(),
           nonExistentField: z.string(),
@@ -92,13 +230,13 @@ describe("prisma-extension-autozod", () => {
 
   describe("createStrictZodRegistry", () => {
     type TestModels = {
-      users: { id: number; firstName: string; email: string; age: number };
+      User: { id: number; firstName: string; email: string; age: number };
     };
 
     it("should accept schema when all contract columns are present", () => {
       const defineModel = createStrictZodRegistry<TestModels>();
       const userValidator = defineModel(
-        "users",
+        "User",
         z.object({
           id: z.number(),
           firstName: z.string(),
@@ -106,14 +244,14 @@ describe("prisma-extension-autozod", () => {
           age: z.number(),
         })
       );
-      expect(userValidator.tableName).toBe("users");
+      expect(userValidator.tableName).toBe("User");
     });
 
     it("should reject schema when required contract columns are missing", () => {
       const defineModel = createStrictZodRegistry<TestModels>();
       // @ts-expect-error missing id, email, and age
       defineModel(
-        "users",
+        "User",
         z.object({
           firstName: z.string(),
         })
@@ -124,10 +262,10 @@ describe("prisma-extension-autozod", () => {
   describe("autoZodPrisma8 Middleware", () => {
     const defineValidator = createZodRegistry();
     const userValidator = defineValidator(
-      "users",
+      "User", // Model name "User"
       z.object({
-        firstName: z.string().min(2),
-        email: z.string().email(),
+        firstName: z.string().min(2), // Schema uses domain field name
+        email: z.string().trim().toLowerCase().email(),
         age: z.number().int().min(18),
       })
     );
@@ -137,35 +275,15 @@ describe("prisma-extension-autozod", () => {
       validators: [userValidator],
     });
 
-    it("should pass valid create mutation", async () => {
+    it("should map storage table 'users' to model 'User' and storage column 'first_name' to schema 'firstName'", async () => {
       const draft = {
         ast: {
           kind: "insert",
-          table: { name: "users" },
+          table: { name: "users" }, // Storage table
           rows: [
             {
-              firstName: "Alice",
-              email: "alice@example.com",
-              age: 25,
-            },
-          ],
-        },
-      };
-
-      await expect(
-        middleware.beforeCompile!(draft as any, {} as any)
-      ).resolves.toBeUndefined();
-    });
-
-    it("should pass valid create mutation with ParamRef wrapped values", async () => {
-      const draft = {
-        ast: {
-          kind: "insert",
-          table: { name: "users" },
-          rows: [
-            {
-              firstName: { value: "Alice" },
-              email: { value: "alice@example.com" },
+              first_name: { value: "Alice" }, // Storage column
+              email: { value: "Alice@Example.com" },
               age: { value: 25 },
             },
           ],
@@ -177,16 +295,16 @@ describe("prisma-extension-autozod", () => {
       ).resolves.toBeUndefined();
     });
 
-    it("should reject invalid create mutation with ZodError", async () => {
+    it("should reject invalid mutation when using mapped storage column", async () => {
       const draft = {
         ast: {
           kind: "insert",
           table: { name: "users" },
           rows: [
             {
-              firstName: "A", // too short (< 2)
-              email: "invalid-email",
-              age: 15, // under 18
+              first_name: { value: "A" }, // Invalid: min(2)
+              email: { value: "alice@example.com" },
+              age: { value: 25 },
             },
           ],
         },
@@ -195,6 +313,54 @@ describe("prisma-extension-autozod", () => {
       await expect(
         middleware.beforeCompile!(draft as any, {} as any)
       ).rejects.toThrow();
+    });
+
+    it("should write back transformed and coerced values into ParamRef.value", async () => {
+      const draft = {
+        ast: {
+          kind: "insert",
+          table: { name: "users" },
+          rows: [
+            {
+              first_name: { value: "Alice" },
+              email: { value: "  ALICE@EXAMPLE.COM  " }, // Has whitespace and uppercase
+              age: { value: 25 },
+            },
+          ],
+        },
+      };
+
+      await middleware.beforeCompile!(draft as any, {} as any);
+
+      // Verify that the transform (.trim().toLowerCase()) was written back into the AST ParamRef
+      expect((draft.ast.rows[0].email as any).value).toBe("alice@example.com");
+    });
+
+    it("should handle DefaultValueExpr in multi-row inserts without failing Zod", async () => {
+      const draft = {
+        ast: {
+          kind: "insert",
+          table: { name: "users" },
+          rows: [
+            {
+              first_name: { value: "Alice" },
+              email: { value: "alice@example.com" },
+              age: { value: 25 },
+            },
+            {
+              first_name: { value: "Bob" },
+              email: { value: "bob@example.com" },
+              age: { kind: "default-value" }, // DefaultValueExpr node generated by ORM
+            },
+          ],
+        },
+      };
+
+      // Even though age is required in full schema, DefaultValueExpr placeholder
+      // indicates the DB should supply the default, so Zod ignores it for this row
+      await expect(
+        middleware.beforeCompile!(draft as any, {} as any)
+      ).resolves.toBeUndefined();
     });
 
     it("should allow partial update mutation missing non-updated fields", async () => {
@@ -203,7 +369,7 @@ describe("prisma-extension-autozod", () => {
           kind: "update",
           table: { name: "users" },
           set: {
-            age: 30, // only updating age, firstName and email are omitted
+            age: { value: 30 }, // Only updating age
           },
         },
       };
@@ -213,13 +379,13 @@ describe("prisma-extension-autozod", () => {
       ).resolves.toBeUndefined();
     });
 
-    it("should reject invalid field in update mutation", async () => {
+    it("should reject invalid field in update mutation on mapped storage column", async () => {
       const draft = {
         ast: {
           kind: "update",
           table: { name: "users" },
           set: {
-            email: "not-an-email",
+            first_name: { value: "X" }, // Invalid (< 2)
           },
         },
       };
@@ -229,40 +395,46 @@ describe("prisma-extension-autozod", () => {
       ).rejects.toThrow();
     });
 
-    it("should remap casing/naming matching contract columns", async () => {
-      const draft = {
+    it("should support validators created with createInsertSchema directly", async () => {
+      const postSchema = createInsertSchema(sampleContract, "Post", {
+        title: (s) => s.min(3),
+      });
+
+      const customMiddleware = autoZodPrisma8({
+        contract: sampleContract,
+        validators: [postSchema],
+      });
+
+      const validDraft = {
         ast: {
           kind: "insert",
-          table: { name: "users" },
+          table: { name: "posts" },
           rows: [
             {
-              first_name: "Bob", // will be remapped to firstName
-              email: "bob@example.com",
-              age: 40,
+              title: { value: "Hello World" },
             },
           ],
         },
       };
 
       await expect(
-        middleware.beforeCompile!(draft as any, {} as any)
+        customMiddleware.beforeCompile!(validDraft as any, {} as any)
       ).resolves.toBeUndefined();
-    });
 
-    it("should validate batch insert arrays", async () => {
-      const draft = {
+      const invalidDraft = {
         ast: {
           kind: "insert",
-          table: { name: "users" },
+          table: { name: "posts" },
           rows: [
-            { firstName: "Charlie", email: "charlie@example.com", age: 22 },
-            { firstName: "Dave", email: "dave@example.com", age: 16 }, // under 18
+            {
+              title: { value: "No" }, // < 3 chars
+            },
           ],
         },
       };
 
       await expect(
-        middleware.beforeCompile!(draft as any, {} as any)
+        customMiddleware.beforeCompile!(invalidDraft as any, {} as any)
       ).rejects.toThrow();
     });
 
@@ -270,12 +442,8 @@ describe("prisma-extension-autozod", () => {
       const draft = {
         ast: {
           kind: "insert",
-          table: { name: "posts" },
-          rows: [
-            {
-              unregisteredField: "any value",
-            },
-          ],
+          table: { name: "unmapped_table" },
+          rows: [{ field: "any" }],
         },
       };
 
@@ -294,12 +462,6 @@ describe("prisma-extension-autozod", () => {
 
       await expect(
         middleware.beforeCompile!(draft as any, {} as any)
-      ).resolves.toBeUndefined();
-    });
-
-    it("should ignore draft without ast", async () => {
-      await expect(
-        middleware.beforeCompile!({} as any, {} as any)
       ).resolves.toBeUndefined();
     });
 

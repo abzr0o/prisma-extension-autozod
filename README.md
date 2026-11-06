@@ -4,12 +4,13 @@
 [![CI](https://github.com/abzr0o/prisma-extension-autozod/actions/workflows/ci.yml/badge.svg)](https://github.com/abzr0o/prisma-extension-autozod/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> Contract-aware compile-time linting and runtime Zod validation for the new Prisma ORM (@prisma/orm-postgres).
+> Contract-aware compile-time linting, automatic schema generation, and runtime Zod validation for the new Prisma ORM (@prisma/orm-postgres).
 
-`prisma-extension-autozod` connects **Zod 4** and **Prisma ORM 8**. It provides two layers of safety:
+`prisma-extension-autozod` connects **Zod 4** and **Prisma ORM 8**. It provides three layers of safety:
 
-1. **Compile-time Linting**: TypeScript flags any field in your Zod schema that does not exist in your Prisma data contract.
-2. **Runtime Middleware**: Automatically intercepts write operations (`create`, `update`, `insert`) via Prisma 8's `beforeCompile` hook, validates payloads, normalizes column naming conventions, and blocks invalid mutations before SQL reaches your database.
+1. **Automatic Schema Inference**: Generate complete insert and update Zod schemas directly from `contract.json` without drifting field definitions.
+2. **Compile-time Linting**: TypeScript flags any field in your Zod schema that does not exist in your Prisma data contract.
+3. **Runtime Middleware**: Automatically intercepts write operations (`create`, `update`, `insert`) via Prisma 8's `beforeCompile` AST hook, maps domain fields to storage columns, sanitizes payloads, and writes back validated transforms, coercions, and defaults directly into database query parameters.
 
 ---
 
@@ -19,8 +20,10 @@
 | :--- | :--- | :--- | :--- |
 | **Zero Controller Boilerplate** | No (Manual `.parse()`) | No (Manual `.parse()`) | Yes (Auto-intercepted) |
 | **Prisma 8 Native Architecture** | No | No | Yes (`beforeCompile` / Contract) |
+| **Direct Schema Inference** | No | Yes (Build step) | Yes (`createInsertSchema(contract, "User")`) |
 | **Compile-Time Typo Linter** | No | No | Yes (Immediate IDE feedback) |
-| **Casing Normalization** | No | No | Yes (`first_name` <-> `firstName`) |
+| **Casing & Column Mapping** | No | No | Yes (`first_name` <-> `firstName`) |
+| **AST Value Write-Back** | No | No | Yes (Transforms and defaults reach DB) |
 
 ---
 
@@ -34,11 +37,11 @@
 
 ## Features
 
+- **Direct Contract Schema Inference**: Infer base Zod schemas straight from your Prisma 8 `contract.json` via `createInsertSchema` and `createUpdateSchema`, with database defaults automatically made optional.
+- **AST Transform & Default Write-Back**: Transformed and coerced values (e.g. `.trim().toLowerCase()`, `z.coerce.date()`, `.default()`) are updated in-place on AST parameter references so they actually persist to PostgreSQL.
+- **Multi-Row Insert Protection**: Transparently handles ORM-generated `DefaultValueExpr` nodes in multi-row inserts without triggering false validation rejections.
+- **Bidirectional Column & Model Mapping**: Seamlessly resolves domain model names to physical storage tables (e.g. `User` -> `users`) and model field names to storage columns (e.g. `firstName` -> `first_name`).
 - **Compile-Time Contract Linting**: Catches schema mismatches and invalid fields at build-time with clear TypeScript diagnostics.
-- **Native Prisma ORM 8 Lifecycle Hook**: Hooks directly into the `beforeCompile` AST pipeline without monkey-patching.
-- **Automatic Column Normalization**: Remaps input casing (e.g., `first_name` to `firstName`) based on your contract's column catalog.
-- **Context-Aware Validation**: Full validation for `create`/`insert`, and automatic `.partial()` validation for `update` operations so omitted fields do not fail.
-- **Flexible Strictness**: Choose between `createZodRegistry` (allows omitting auto-generated/default fields like `id` or `createdAt`) and `createStrictZodRegistry` (enforces full table column coverage).
 - **Dual ESM & CJS**: Full TypeScript `.d.ts` declarations included out-of-the-box.
 
 ---
@@ -60,51 +63,58 @@ yarn add prisma-extension-autozod zod @prisma/orm-postgres
 
 ## Quickstart
 
-### 1. Define Validated Schemas with Contract Linting
+### 1. Infer Schemas Directly from contract.json (Recommended)
 
-Bind your Zod schemas to your generated Prisma 8 `models` using `createZodRegistry`:
+Generate complete Zod schemas with zero manual field maintenance and customize individual fields with refinements:
+
+```typescript
+import { createInsertSchema, createUpdateSchema } from "prisma-extension-autozod";
+import contractJson from "./contract.json" with { type: "json" };
+
+// Inferred from contract.json with defaults (e.g. id, createdAt) marked optional:
+export const userCreateSchema = createInsertSchema(contractJson, "User", {
+  email: (s) => s.email("Must be a valid email").toLowerCase().trim(),
+  name: (s) => s.min(2),
+});
+
+// Update schema with all fields partial:
+export const userUpdateSchema = createUpdateSchema(contractJson, "User");
+```
+
+---
+
+### 2. Or Define Custom Schemas with Contract Linting
+
+If you prefer authoring your schemas manually, bind them to your contract types using `createZodRegistry`:
 
 ```typescript
 import { z } from "zod";
 import { createZodRegistry } from "prisma-extension-autozod";
 import type { models } from "./contract.d.ts";
 
-// Create a registry bound to your Prisma 8 contract models
 const defineModel = createZodRegistry<typeof models.public>();
 
 export const userValidator = defineModel(
   "User",
   z.object({
-    email: z.string().email("Invalid email address"),
-    username: z
-      .string()
-      .min(2, "Username must be at least 2 characters")
-      .nullable()
-      .optional(),
-    name: z
-      .string()
-      .min(2, "Name must be at least 2 characters")
-      .nullable()
-      .optional(),
+    email: z.string().email(),
+    username: z.string().min(2).nullable().optional(),
+    name: z.string().min(2).nullable().optional(),
   }),
 );
 ```
 
-> **Compile-Time Safety in Action:**
+> **Compile-Time Typo Protection:**
 > If you add a field that does not exist in the contract:
->
 > ```typescript
-> defineModel(
->   "User",
->   z.object({
->     nonExistentColumn: z.string(), // Error: Field 'nonExistentColumn' does not exist in table contract
->   }),
-> );
+> defineModel("User", z.object({
+>   nonExistentColumn: z.string(), // Error: Field 'nonExistentColumn' does not exist in table contract
+> }));
 > ```
 
 ---
 
-### 2. Register Middleware in Your Prisma 8 Client
+### 3. Register Middleware in Your Prisma 8 Client
 
 Pass the middleware to your `@prisma/orm-postgres` client setup:
 
@@ -114,7 +124,7 @@ import { contractFromJson } from "@prisma/orm-postgres/static";
 import { autoZodPrisma8 } from "prisma-extension-autozod";
 
 import contractJson from "./contract.json" with { type: "json" };
-import { userValidator } from "./schemas.ts";
+import { userCreateSchema } from "./schemas.ts";
 
 export const contract = contractFromJson(contractJson);
 
@@ -124,7 +134,7 @@ export const db = postgres({
   middleware: [
     autoZodPrisma8({
       contract: contractJson,
-      validators: [userValidator],
+      validators: [userCreateSchema],
     }),
   ],
 });
@@ -132,19 +142,19 @@ export const db = postgres({
 
 ---
 
-### 3. Automatic Validation & Sanitization
+### 4. Automatic Validation & Transform Write-Back
 
 In the new Prisma ORM, models are accessed via `db.orm.<namespace>.<ModelName>`:
 
 ```typescript
-// Valid: Passes validation and executes
+// Valid: Passes validation, applies transforms, and executes
 await db.orm.public.User.create({
-  email: "alice@prisma.io",
+  email: "  Alice@Prisma.IO  ", // Written back as "alice@prisma.io" in database
   username: "alice",
   name: "Alice Smith",
 });
 
-// Invalid: Throws standard ZodError before hitting the database
+// Invalid: Throws standard ZodError before hitting PostgreSQL
 await db.orm.public.User.create({
   email: "not-an-email",
   username: "a", // too short (< 2 characters)
@@ -153,52 +163,79 @@ await db.orm.public.User.create({
 
 // Update: Only supplied fields are validated
 await db.orm.public.User.where({ email: "alice@prisma.io" }).update({
-  name: "Alice Wonder", // Valid; other fields are not required on updates
+  name: "Alice Wonder", // Valid; omitted fields are ignored on updates
 });
 ```
 
 ---
 
-### 4. Column Normalization in Action
+### 5. Safe Route Validation (Mass Assignment Protection)
 
-Incoming payloads from frontend forms or REST APIs often use `snake_case`. The middleware automatically remaps them to match your contract columns:
+Never pass raw client input (`req.body`) directly to database writes. In web applications, unvalidated payloads allow clients to inject unauthorized columns (such as `role: 'admin'`, `emailVerified: true`, or `ownerId`).
+
+The recommended, secure pattern is to parse `req.body` at your route handler, which strips unauthorized fields, while `autoZodPrisma8` provides an automatic database-layer guard rail:
 
 ```typescript
-// Incoming frontend payload uses snake_case:
+import { ZodError } from "zod";
+import { userCreateSchema } from "./schemas.ts";
+
+// Express / NestJS / Fastify / Hono route handler:
+app.post("/users", async (req, res) => {
+  try {
+    // 1. Safe route validation: strips unknown fields & prevents mass assignment
+    const validatedData = userCreateSchema.parse(req.body);
+
+    // 2. Database mutation: intercepted & verified by AutoZod middleware
+    const user = await db.orm.public.User.create(validatedData);
+    return res.status(201).json(user);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      // Return clean, flattened validation errors directly to the client
+      return res.status(400).json({ errors: error.flatten().fieldErrors });
+    }
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+```
+
+---
+
+### 6. Storage Column & Casing Normalization
+
+If your Prisma contract maps camelCase model fields to snake_case storage columns (e.g. `@map("first_name")`), or if incoming payloads use alternative casing, `autoZodPrisma8` transparently reconciles them:
+
+```typescript
+// Model has firstName with @map("first_name"):
+// Middleware automatically resolves `first_name` in AST rows to the `firstName` schema
 await db.orm.public.User.create({
-  first_name: "Alice", // Automatically remapped to `firstName` in Postgres
+  first_name: "Alice",
   email: "alice@prisma.io",
 });
 ```
 
 ---
 
-### 5. Error Handling DX
+## API Reference
 
-Because validation throws standard `ZodError` instances, you can easily catch and format errors for HTTP responses in Express, NestJS, Fastify, or Hono:
+### `createInsertSchema(contract, modelName, refinements?)`
 
+Infers a complete Zod insert schema from `contract.json`. Fields with database defaults (`autoincrement()`, `now()`) are marked optional.
 ```typescript
-import { ZodError } from "zod";
-
-try {
-  await db.orm.public.User.create(req.body);
-} catch (error) {
-  if (error instanceof ZodError) {
-    // Clean flattened validation errors directly back to the client
-    return res.status(400).json({ errors: error.flatten().fieldErrors });
-  }
-  throw error;
-}
+const userCreateSchema = createInsertSchema(contractJson, "User", {
+  email: (s) => s.email(),
+});
 ```
 
----
+### `createUpdateSchema(contract, modelName, refinements?)`
 
-## API Reference
+Infers a partial Zod update schema from `contract.json`.
+```typescript
+const userUpdateSchema = createUpdateSchema(contractJson, "User");
+```
 
 ### `createZodRegistry<TModels>()`
 
 Creates a model validator factory bound to your contract models. Validates that all fields in the schema exist in the contract table, allowing omission of auto-generated or optional fields.
-
 ```typescript
 const defineModel = createZodRegistry<typeof models.public>();
 const userValidator = defineModel("User", zodSchema);
@@ -207,7 +244,6 @@ const userValidator = defineModel("User", zodSchema);
 ### `createStrictZodRegistry<TModels>()`
 
 Creates a strict validator factory that requires all columns in the contract table to be declared in the schema, while also rejecting unknown fields.
-
 ```typescript
 const defineStrict = createStrictZodRegistry<typeof models.public>();
 const userValidator = defineStrict("User", zodSchema);
@@ -216,17 +252,8 @@ const userValidator = defineStrict("User", zodSchema);
 ### `autoZodPrisma8(options)` (alias: `autoZod`)
 
 Prisma ORM 8 middleware factory:
-
-- `options.contract`: The raw `contract.json` object.
-- `options.validators`: Array of validator entries returned by `createZodRegistry` or `createStrictZodRegistry`.
-
-### `extractColumns(contractJson)`
-
-Helper function that inspects storage namespaces inside `contract.json` and returns a normalized dictionary of table column names.
-
-### `normalizeKey(key: string)`
-
-Normalizes strings to lowercase alphanumeric format for reliable case- and separator-insensitive mapping.
+- `options.contract`: The parsed `contract.json` object.
+- `options.validators`: Array of validator entries returned by `createInsertSchema`, `createZodRegistry`, or `createStrictZodRegistry`.
 
 ---
 

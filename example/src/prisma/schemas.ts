@@ -1,6 +1,7 @@
 import { z } from "zod";
-import { createZodRegistry } from "prisma-extension-autozod";
+import { createZodRegistry, createInsertSchema } from "prisma-extension-autozod";
 import type { models } from "./contract.d.ts";
+import contractJson from "./contract.json" with { type: "json" };
 
 const defineModel = createZodRegistry<typeof models.public>();
 
@@ -13,14 +14,9 @@ export const userValidator = defineModel(
   })
 );
 
-export const postValidator = defineModel(
-  "Post",
-  z.object({
-    title: z.string().min(3, "Title must have at least 3 characters"),
-    content: z.string().nullable().optional(),
-    authorId: z.number().int().positive(),
-  })
-);
+// Inferred directly from contract.json without drift:
+export const postValidator = createInsertSchema(contractJson, "Post", {
+  title: (s) => s.min(3, "Title must have at least 3 characters"),
+});
 
 export const validators = [userValidator, postValidator];
-
